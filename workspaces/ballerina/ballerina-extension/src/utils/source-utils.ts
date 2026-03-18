@@ -20,8 +20,8 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { workspace } from 'vscode';
 import { Uri } from 'vscode';
-import { ArtifactData, EVENT_TYPE, MACHINE_VIEW, ProjectStructureArtifactResponse, STModification, TextEdit } from '@wso2/ballerina-core';
-import { openView, StateMachine, undoRedoManager } from '../stateMachine';
+import { ArtifactData, MACHINE_VIEW, ProjectStructureArtifactResponse, STModification, TextEdit } from '@wso2/ballerina-core';
+import { StateMachine, undoRedoManager } from '../stateMachine';
 import { ArtifactsUpdated, ArtifactNotificationHandler } from './project-artifacts-handler';
 import { existsSync, writeFileSync, mkdirSync } from 'fs';
 import * as path from 'path';
@@ -117,17 +117,17 @@ export async function updateSourceCode(updateSourceCodeRequest: UpdateSourceCode
         // Iterate through modificationRequests and apply modifications
         try {
             // <-------- Using simply the text edits to update the source code -------->
+            // Always apply edits to the LOCAL file so the LS sees changes immediately.
+            // Remote URI sync happens separately after formatting to avoid duplication
+            // caused by OCT's Yjs CRDT interfering when both URIs are in the same WorkspaceEdit.
             const workspaceEdit = new vscode.WorkspaceEdit();
             for (const [fileUriString, request] of Object.entries(modificationRequests)) {
-                // Check if this is a cached path with a remote URI
-                const remoteUri = uriCache?.getRemoteUri(request.filePath);
-                // Use remote URI if available, else use local file URI
-                const targetUri = remoteUri || Uri.file(request.filePath);
-                
+                const localFileUri = Uri.file(request.filePath);
+
                 for (const modification of request.modifications) {
                     const source = modification.config.STATEMENT;
                     workspaceEdit.replace(
-                        targetUri,
+                        localFileUri,
                         new vscode.Range(
                             new vscode.Position(modification.startLine, modification.startColumn),
                             new vscode.Position(modification.endLine, modification.endColumn)
@@ -135,20 +135,8 @@ export async function updateSourceCode(updateSourceCodeRequest: UpdateSourceCode
                         source
                     );
                 }
-            }         
-            await workspace.applyEdit(workspaceEdit);
-            
-            // Save remote documents to ensure changes are persisted
-            for (const [fileUriString, request] of Object.entries(modificationRequests)) {
-                const remoteUri = uriCache?.getRemoteUri(request.filePath);
-                
-                if (remoteUri) {
-                    const doc = workspace.textDocuments.find((doc) => doc.uri.toString() === remoteUri.toString());
-                    if (doc) {
-                        await doc.save();
-                    }
-                }
             }
+            await workspace.applyEdit(workspaceEdit);
             
             // <-------- Format the document after applying all changes using the native formatting API-------->
             const formattedWorkspaceEdit = new vscode.WorkspaceEdit();
@@ -179,6 +167,32 @@ export async function updateSourceCode(updateSourceCodeRequest: UpdateSourceCode
             // Apply all formatted changes at once
             await workspace.applyEdit(formattedWorkspaceEdit);
 
+            // Sync final formatted content to remote URIs (for OCT collaboration sync).
+            // This is done in a SEPARATE WorkspaceEdit to avoid duplication caused by
+            // OCT's Yjs CRDT interfering when local and remote URIs are in the same edit.
+            for (const [, request] of Object.entries(modificationRequests)) {
+                const remoteUri = uriCache?.getRemoteUri(request.filePath);
+                if (remoteUri) {
+                    const localDoc = await workspace.openTextDocument(Uri.file(request.filePath));
+                    const finalContent = localDoc.getText();
+                    const remoteEdit = new vscode.WorkspaceEdit();
+                    remoteEdit.replace(
+                        remoteUri,
+                        new vscode.Range(
+                            new vscode.Position(0, 0),
+                            new vscode.Position(Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER)
+                        ),
+                        finalContent
+                    );
+                    await workspace.applyEdit(remoteEdit);
+                    // Save remote document to persist changes to OCT
+                    const remoteDoc = workspace.textDocuments.find((d) => d.uri.toString() === remoteUri.toString());
+                    if (remoteDoc) {
+                        await remoteDoc.save();
+                    }
+                }
+            }
+
             // Handle missing dependencies after all changes are applied
             if (updateSourceCodeRequest.resolveMissingDependencies) {
                 for (const [fileUriString] of Object.entries(modificationRequests)) {
@@ -208,13 +222,15 @@ export async function updateSourceCode(updateSourceCodeRequest: UpdateSourceCode
                     }
                 });
 
-                // Set a timeout to reject if no notification is received within 10 seconds
+                // Set a timeout to resolve gracefully if no notification is received.
+                // Do NOT navigate to PackageOverview — let the user stay on the current view
+                // and trigger a webview refresh so they see the updated state.
                 const timeoutId = setTimeout(() => {
-                    console.log("No artifact update notification received within 10 seconds");
+                    console.log("No artifact update notification received within 10 seconds, resolving gracefully");
                     unsubscribe();
                     StateMachine.setReadyMode();
-                    openView(EVENT_TYPE.OPEN_VIEW, { view: MACHINE_VIEW.PackageOverview });
-                    reject(new Error("Operation timed out. Please try again."));
+                    notifyCurrentWebview();
+                    resolve([]);
                 }, 10000);
 
                 // Clear the timeout when notification is received

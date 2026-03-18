@@ -28,7 +28,7 @@ import {
     CONTAINER_PADDING,
     DRAFT_NODE_BORDER_WIDTH,
 } from "../../../resources/constants";
-import { Button, Item, Menu, MenuItem, Popover, ThemeColors } from "@wso2/ui-toolkit";
+import { Button, Item, Menu, MenuItem, Popover, ThemeColors, Tooltip } from "@wso2/ui-toolkit";
 import { FlowNode } from "../../../utils/types";
 import { useDiagramContext } from "../../DiagramContext";
 import { MoreVertIcon } from "../../../resources";
@@ -158,6 +158,27 @@ export namespace NodeStyles {
         width: 100%;
     `;
 
+    export const LockIndicator = styled.div`
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background-color: ${ThemeColors.SECONDARY_CONTAINER};
+        border: 2px solid ${ThemeColors.SECONDARY};
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        cursor: help;
+    `;
+
+    export const LockIcon = styled.div`
+        color: ${ThemeColors.ON_SECONDARY};
+        font-size: 10px;
+    `;
+
     export type ContainerStyleProp = {
         width: number;
         height: number;
@@ -191,9 +212,10 @@ export interface NodeWidgetProps extends Omit<WhileNodeWidgetProps, "children"> 
 
 export function WhileNodeWidget(props: WhileNodeWidgetProps) {
     const { model, engine, onClick } = props;
-    const { onNodeSelect, goToSource, onDeleteNode, addBreakpoint, removeBreakpoint, readOnly, selectedNodeId } = useDiagramContext();
+    const { onNodeSelect, goToSource, onDeleteNode, addBreakpoint, removeBreakpoint, readOnly, selectedNodeId, currentUserId } = useDiagramContext();
 
     const isSelected = selectedNodeId === model.node.id;
+    const isLocked = Boolean(model.node.locked && model.node.locked.userId !== currentUserId);
 
     const [isHovered, setIsHovered] = React.useState(false);
     const [anchorEl, setAnchorEl] = useState<HTMLElement | SVGSVGElement>(null);
@@ -215,7 +237,7 @@ export function WhileNodeWidget(props: WhileNodeWidgetProps) {
     const isEditable = model.node.codedata.node !== "LOCK";
 
     const handleOnClick = (event: React.MouseEvent<HTMLDivElement>) => {
-        if (readOnly) {
+        if (readOnly || isLocked) {
             return;
         }
         if (event.metaKey) {
@@ -291,15 +313,28 @@ export function WhileNodeWidget(props: WhileNodeWidgetProps) {
                         onClick={isEditable ? handleOnClick : undefined}
                         onMouseEnter={() => setIsHovered(true)}
                         onMouseLeave={() => setIsHovered(false)}
-                        onContextMenu={!readOnly ? handleOnContextMenu : undefined}
+                        onContextMenu={!readOnly && !isLocked ? handleOnContextMenu : undefined}
                         selected={model.isSelected()}
                         hovered={isEditable && isHovered}
                         hasError={hasError}
-                        readOnly={readOnly}
+                        readOnly={readOnly || isLocked}
                         isActiveBreakpoint={isActiveBreakpoint}
                         disabled={disabled}
                         isSelected={isSelected}
+                        style={{
+                            opacity: isLocked ? 0.6 : 1,
+                            cursor: isLocked ? 'not-allowed' : undefined
+                        }}
                     >
+                        {isLocked && (
+                            <Tooltip content={`Locked by ${model.node.locked.userName}`}>
+                                <NodeStyles.LockIndicator>
+                                    <NodeStyles.LockIcon>
+                                        🔒
+                                    </NodeStyles.LockIcon>
+                                </NodeStyles.LockIndicator>
+                            </Tooltip>
+                        )}
                         {hasBreakpoint && (
                             <div
                                 style={{
@@ -327,7 +362,7 @@ export function WhileNodeWidget(props: WhileNodeWidgetProps) {
                 </NodeStyles.Header>
                 <NodeStyles.StyledButton
                     ref={setMenuButtonElement}
-                    buttonSx={readOnly ? { cursor: "not-allowed" } : {}}
+                    buttonSx={readOnly || isLocked ? { cursor: "not-allowed" } : {}}
                     appearance="icon"
                     onClick={handleOnMenuClick}
                 >

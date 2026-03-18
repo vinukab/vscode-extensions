@@ -33,7 +33,7 @@ import {
     NODE_PADDING,
     NODE_WIDTH,
 } from "../../../resources/constants";
-import { Button, Icon, Item, Menu, MenuItem, Popover, ThemeColors } from "@wso2/ui-toolkit";
+import { Button, Icon, Item, Menu, MenuItem, Popover, ThemeColors, Tooltip } from "@wso2/ui-toolkit";
 import { MoreVertIcon } from "../../../resources/icons";
 import { AgentData, FlowNode, ToolData } from "../../../utils/types";
 import NodeIcon from "../../NodeIcon";
@@ -409,6 +409,27 @@ export namespace NodeStyles {
         color: ${ThemeColors.ON_SURFACE};
         opacity: 0.7;
     `;
+
+    export const LockIndicator = styled.div`
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        background-color: ${ThemeColors.SECONDARY_CONTAINER};
+        border: 2px solid ${ThemeColors.SECONDARY};
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+        cursor: help;
+    `;
+
+    export const LockIcon = styled.div`
+        color: ${ThemeColors.ON_SECONDARY};
+        font-size: 10px;
+    `;
 }
 
 interface AgentCallNodeWidgetProps {
@@ -421,10 +442,11 @@ export interface NodeWidgetProps extends Omit<AgentCallNodeWidgetProps, "childre
 
 export function AgentCallNodeWidget(props: AgentCallNodeWidgetProps) {
     const { model, engine, onClick } = props;
-    const { onNodeSelect, goToSource, onDeleteNode, removeBreakpoint, addBreakpoint, agentNode, readOnly, selectedNodeId } =
+    const { onNodeSelect, goToSource, onDeleteNode, removeBreakpoint, addBreakpoint, agentNode, readOnly, selectedNodeId, currentUserId } =
         useDiagramContext();
 
     const isSelected = selectedNodeId === model.node.id;
+    const isLocked = Boolean(model.node.locked && model.node.locked.userId !== currentUserId);
 
     const [isBoxHovered, setIsBoxHovered] = useState(false);
     const [anchorEl, setAnchorEl] = useState<HTMLElement | SVGSVGElement>(null);
@@ -446,7 +468,7 @@ export function AgentCallNodeWidget(props: AgentCallNodeWidgetProps) {
     }, [model.node.suggested]);
 
     const handleOnClick = (event: React.MouseEvent<HTMLDivElement>) => {
-        if (readOnly) {
+        if (readOnly || isLocked) {
             return;
         }
         if (event.metaKey) {
@@ -519,7 +541,7 @@ export function AgentCallNodeWidget(props: AgentCallNodeWidgetProps) {
     };
 
     const handleOnMenuClick = (event: React.MouseEvent<HTMLElement | SVGSVGElement>) => {
-        if (readOnly) {
+        if (readOnly || isLocked) {
             return;
         }
         setAnchorEl(event.currentTarget);
@@ -652,9 +674,22 @@ export function AgentCallNodeWidget(props: AgentCallNodeWidgetProps) {
                 isSelected={isSelected}
                 onMouseEnter={() => setIsBoxHovered(true)}
                 onMouseLeave={() => setIsBoxHovered(false)}
-                onContextMenu={!readOnly ? handleOnContextMenu : undefined}
+                onContextMenu={!readOnly && !isLocked ? handleOnContextMenu : undefined}
                 title="Configure Agent"
+                style={{
+                    opacity: isLocked ? 0.6 : 1,
+                    cursor: isLocked ? 'not-allowed' : undefined
+                }}
             >
+                {isLocked && (
+                    <Tooltip content={`Locked by ${model.node.locked.userName}`}>
+                        <NodeStyles.LockIndicator>
+                            <NodeStyles.LockIcon>
+                                🔒
+                            </NodeStyles.LockIcon>
+                        </NodeStyles.LockIndicator>
+                    </Tooltip>
+                )}
                 {hasBreakpoint && (
                     <div
                         style={{
@@ -684,7 +719,7 @@ export function AgentCallNodeWidget(props: AgentCallNodeWidgetProps) {
                                 {hasError && <DiagnosticsPopUp node={model.node} />}
                                 <NodeStyles.MenuButton
                                     ref={setMenuButtonElement}
-                                    buttonSx={readOnly ? { cursor: "not-allowed" } : {}}
+                                    buttonSx={readOnly || isLocked ? { cursor: "not-allowed" } : {}}
                                     appearance="icon"
                                     onClick={handleOnMenuClick}
                                 >

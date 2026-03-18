@@ -153,6 +153,7 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
     );
     const [currentUserName, setCurrentUserName] = useState<string>("Unknown User");
     const [nodeLocks, setNodeLocks] = useState<Record<string, any>>({});
+    const nodeLocksRef = useRef<Record<string, any>>({});
     const [isCollaborationActive, setIsCollaborationActive] = useState<boolean>(false);
     const [remoteCursors, setRemoteCursors] = useState<Map<string, any>>(new Map());
     const CURSOR_HEARTBEAT_INTERVAL_MS = 3000;
@@ -220,6 +221,18 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
     useEffect(() => {
         currentModelFileRef.current = model?.fileName;
     }, [model?.fileName]);
+
+    // Keep nodeLocksRef in sync so setModelWithLocks always has the latest locks
+    useEffect(() => { nodeLocksRef.current = nodeLocks; }, [nodeLocks]);
+
+    // Helper: set model with current locks applied so lock decorations survive model refreshes
+    const setModelWithLocks = useCallback((newModel: Flow) => {
+        const locks = nodeLocksRef.current;
+        const lockedModel = Object.keys(locks).length > 0
+            ? updateNodeLocks(newModel, locks)
+            : newModel;
+        setModel(lockedModel);
+    }, []);
 
         const debouncedGetFlowModel = useCallback(
         debounce(() => {
@@ -389,7 +402,23 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
                     // Fall back to filePath suffix match for peers that haven't sent diagramId yet.
                     const isForCurrentDiagram = !data.filePath || !normalizedCurrentFile || (() => {
                         if (data.diagramId && localDiagramId) {
-                            return data.diagramId === localDiagramId;
+                            console.log(`[OCT Webview] Comparing diagram IDs: peer ${data.diagramId} vs local ${localDiagramId} => ${data.diagramId === localDiagramId}`);
+                            if (data.diagramId === localDiagramId) {
+                                return true;
+                            }
+                            // Handle path prefix differences (e.g. "test/automation.bal:5" vs "automation.bal:5")
+                            const colonIdx = data.diagramId.lastIndexOf(':');
+                            const peerFile = colonIdx >= 0 ? data.diagramId.slice(0, colonIdx) : data.diagramId;
+                            const peerLine = colonIdx >= 0 ? data.diagramId.slice(colonIdx + 1) : '';
+                            const localColonIdx = localDiagramId.lastIndexOf(':');
+                            const localFile = localColonIdx >= 0 ? localDiagramId.slice(0, localColonIdx) : localDiagramId;
+                            const localLine = localColonIdx >= 0 ? localDiagramId.slice(localColonIdx + 1) : '';
+                            if (peerLine === localLine) {
+                                return peerFile === localFile
+                                    || peerFile.endsWith('/' + localFile)
+                                    || localFile.endsWith('/' + peerFile);
+                            }
+                            return false;
                         }
                         const pathA = normalizeFilePath(data.filePath);
                         const pathB = normalizedCurrentFile;
@@ -440,9 +469,10 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
                     }
                 }
 
-                // Use OCT presence as lock source only when authoritative lock subscription is not available.
-                // Always process empty lock arrays as an explicit clear for that peer.
-                if (!hasAuthoritativeLockUpdatesRef.current && data.locks !== undefined) {
+                // Always process presence-based lock updates as a reliable fallback.
+                // Yjs-based updates (via onNodeLockUpdated) take priority when they arrive,
+                // but presence locks ensure propagation even when Yjs Y.Map isn't connected.
+                if (data.locks !== undefined) {
                     const normalizedCurrentFile = currentModelFileRef.current
                         ? normalizeFilePath(currentModelFileRef.current)
                         : undefined;
@@ -830,7 +860,7 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
                                 }
                             }
                             updateAgentModelTypes(model?.flowModel);
-                            setModel(model.flowModel);
+                            setModelWithLocks(model.flowModel);
                             const parentMetadata = model.flowModel.nodes.find(
                                 (node) => node.codedata.node === "EVENT_START"
                             )?.metadata.data as ParentMetadata | undefined;
@@ -1400,7 +1430,7 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
         if (hasDraft) {
             const restoredModel = cancelDraft();
             if (restoredModel) {
-                setModel(restoredModel);
+                setModelWithLocks(restoredModel);
             }
             setSuggestedModel(undefined);
             suggestedText.current = undefined;
@@ -1438,7 +1468,7 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
                 console.log('[Lock Frontend] Lock already held by current user, skipping acquisition');
                 if (!hasDraft) {
                     const modelWithDraft = addDraftNode(parent, target);
-                    setModel(modelWithDraft);
+                    setModelWithLocks(modelWithDraft);
                 }
             } else {
                 const lockResult = await acquireNodeLock(positionLockKey);
@@ -1463,7 +1493,7 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
 
                 // Now that lock is acquired, add draft node and update model
                 const modelWithDraft = addDraftNode(parent, target);
-                setModel(modelWithDraft);
+                setModelWithLocks(modelWithDraft);
             }
         }
         rpcClient
@@ -2263,9 +2293,9 @@ export function BIFlowDiagram(props: BIFlowDiagramProps) {
 
         if (isCollaborationActive) {
             const lastCursor = lastBroadcastCursorRef.current;
-            if (lastCursor) {
-                sendPresenceUpdate(lastCursor.x, lastCursor.y, node.id, { selectedNodeIdsOverride: [node.id] });
-            }
+            // Always send presence update with nodeId — the receiver resolves cursor position
+            // to the node center via getPreferredCursorAnchor, so raw x/y are just fallbacks
+            sendPresenceUpdate(lastCursor?.x ?? 0, lastCursor?.y ?? 0, node.id, { selectedNodeIdsOverride: [node.id] });
         }
 
         rpcClient
